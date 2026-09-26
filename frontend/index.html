@@ -57,8 +57,25 @@
     <button id="btn-equivalent-example" type="button" class="secondary">载入：等价样例</button>
   </section>
 
+  <section class="cruise-input" id="cruise-input">
+    <h2>巡航周期长期安全占比审计</h2>
+    <p class="hint">
+      普通有限命令串复核完成后，可填写一个由两侧共同 ASCII 命令构成、长度不超过 6 的巡航周期
+      （本审计要求每侧状态数不超过 8）。服务端把每轮周期压缩为精确随机矩阵，区分暂态质量与全部闭类及其周期，
+      求无限重复下每个命令相位的最终周期性安全概率，并按两侧共同重复周期逐相位比较——全程精确有理数，
+      不做固定轮数模拟或浮点近似。
+    </p>
+    <div class="cruise-row">
+      <label>巡航周期（将被无限重复的命令串，1–6 个字符）
+        <input type="text" id="cruise-cycle" maxlength="6" placeholder="例如 xxy" data-path="cycle" autocomplete="off" />
+      </label>
+      <button id="btn-cruise" type="button">巡航审计</button>
+    </div>
+  </section>
+
   <section id="errors" class="errors" hidden></section>
   <section id="result" class="result" hidden></section>
+  <section id="cruise-result" class="result" hidden></section>
 </main>
 
 <footer>声学规程前后端 · Docker / Compose 发布</footer>

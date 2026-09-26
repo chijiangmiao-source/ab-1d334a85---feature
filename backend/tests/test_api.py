@@ -82,3 +82,97 @@ def test_malformed_json_body():
     resp = client.post("/api/review", content=b"{not json", headers={"Content-Type": "application/json"})
     assert resp.status_code == 400
     assert resp.json()["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# 巡航周期长期安全占比审计
+# ---------------------------------------------------------------------------
+
+
+def test_cruise_equivalent_pair():
+    m = {"x": [["0", "1"], ["1", "0"]]}
+    body = {
+        "A": _proc(2, ["1", "0"], [0], m),
+        "B": _proc(2, ["1", "0"], [0], m),
+        "cycle": "x",
+    }
+    resp = client.post("/api/cruise", json=body)
+    assert resp.status_code == 200
+    result = resp.json()["result"]
+    assert result["equivalent"] is True
+    assert result["cycle"] == "x"
+    assert result["firstDifference"] is None
+    # 周期 2 闭类：两个全局相位上安全概率交替 1、0（精确分数）
+    assert [p["A"]["text"] for p in result["phases"]] == ["1", "0"]
+    cls = result["A"]["classes"][0]
+    assert cls["period"] == 2 and cls["cyclicClasses"] == [[0], [1]]
+    assert result["A"]["transientStates"] == []
+
+
+def test_cruise_first_difference_payload_is_exact():
+    body = {
+        "A": _proc(2, ["1", "0"], [0], {"x": [["0", "1"], ["1", "0"]]}),
+        "B": _proc(2, ["1", "0"], [0], {"x": [["0", "1"], ["0", "1"]]}),
+        "cycle": "x",
+    }
+    resp = client.post("/api/cruise", json=body)
+    assert resp.status_code == 200
+    result = resp.json()["result"]
+    assert result["equivalent"] is False
+    fd = result["firstDifference"]
+    assert (fd["t"], fd["round"], fd["phase"]) == (0, 0, 0)
+    assert fd["A"] == {"num": 1, "den": 1, "text": "1"}
+    assert fd["B"] == {"num": 0, "den": 1, "text": "0"}
+    assert fd["difference"] == {"num": 1, "den": 1, "text": "1"}
+    # 闭类贡献权重均为精确分数对象，且贡献之和恰为该侧概率
+    from fractions import Fraction
+
+    for side in ("A", "B"):
+        acc = Fraction(0)
+        for c in fd["contributions"][side]:
+            assert set(c["weight"]) == {"num", "den", "text"}
+            assert set(c["safetyContribution"]) == {"num", "den", "text"}
+            acc += Fraction(c["safetyContribution"]["num"], c["safetyContribution"]["den"])
+        assert acc == Fraction(fd[side]["num"], fd[side]["den"])
+
+
+def test_cruise_cycle_validation_locates_input():
+    m = {"x": [["1", "0"], ["0", "1"]]}
+    pair = {"A": _proc(2, ["1", "0"], [0], m), "B": _proc(2, ["1", "0"], [0], m)}
+
+    resp = client.post("/api/cruise", json={**pair, "cycle": ""})
+    assert resp.status_code == 400
+    assert any(e["loc"] == ["cycle"] for e in resp.json()["errors"])
+
+    resp = client.post("/api/cruise", json={**pair, "cycle": "xz"})
+    assert resp.status_code == 400
+    locs = [e["loc"] for e in resp.json()["errors"]]
+    assert ["cycle", 1] in locs and ["cycle"] in locs
+
+    resp = client.post("/api/cruise", json={**pair, "cycle": "xxxxxxx"})
+    assert resp.status_code == 400
+    assert any(e["loc"] == ["cycle"] for e in resp.json()["errors"])
+
+    resp = client.post("/api/cruise", json={**pair})
+    assert resp.status_code == 400
+    assert any(e["loc"] == ["cycle"] for e in resp.json()["errors"])
+
+
+def test_cruise_state_limit_locates_input_but_review_unaffected():
+    ident = [["1" if i == j else "0" for j in range(9)] for i in range(9)]
+    big = _proc(9, ["1"] + ["0"] * 8, [0], {"x": ident})
+    resp = client.post("/api/cruise", json={"A": big, "B": big, "cycle": "x"})
+    assert resp.status_code == 400
+    assert any(e["loc"] == ["cycle"] for e in resp.json()["errors"])
+    # 普通有限串复核不受 8 态上限影响
+    resp = client.post("/api/review", json={"A": big, "B": big})
+    assert resp.status_code == 200
+    assert resp.json()["result"] == {"equivalent": True}
+
+
+def test_cruise_procedure_errors_keep_original_locs():
+    good = _proc(2, ["1", "0"], [0], {"x": [["1", "0"], ["0", "1"]]})
+    bad = _proc(2, ["1/2", "1/3"], [0], {"x": [["1", "0"], ["0", "1"]]})
+    resp = client.post("/api/cruise", json={"A": bad, "B": good, "cycle": "x"})
+    assert resp.status_code == 400
+    assert any(e["loc"][:2] == ["A", "initial"] for e in resp.json()["errors"])

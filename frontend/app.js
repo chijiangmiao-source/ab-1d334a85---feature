@@ -145,6 +145,8 @@ let dirty = false;
 function markDirty() {
   dirty = true;
   $("result").hidden = true;
+  // 重新编辑规程草稿后，旧巡航审计结论同样不得附着到新草稿
+  $("cruise-result").hidden = true;
   clearHighlights();
 }
 
@@ -154,6 +156,12 @@ for (const side of sides) {
   $(`safe-${side}`).addEventListener("input", markDirty);
   $(`initial-${side}`).addEventListener("input", markDirty);
 }
+
+// 编辑巡航输入本身也立即清除上一次巡航结论
+$("cruise-cycle").addEventListener("input", () => {
+  $("cruise-result").hidden = true;
+  $("cruise-cycle").classList.remove("invalid");
+});
 
 // ---------------------------------------------------------------------------
 // 错误定位
@@ -237,6 +245,10 @@ function showErrors(errors) {
       if (field === "initial") $(`initial-${err.loc[0]}`).classList.add("invalid");
       if (field === "safe") $(`safe-${err.loc[0]}`).classList.add("invalid");
       if (field === "n") $(`n-${err.loc[0]}`).classList.add("invalid");
+    }
+    // 巡航输入错误（loc 以 "cycle" 开头）：定位到本次巡航输入
+    if (err.loc && err.loc[0] === "cycle") {
+      $("cruise-cycle").classList.add("invalid");
     }
   }
   box.appendChild(ul);
@@ -369,6 +381,206 @@ $("btn-review").addEventListener("click", async () => {
     else renderCounterexample(data.result);
   } catch (e) {
     showErrors([{ loc: [], msg: `API 请求失败：${e.message}` }]);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 巡航周期长期安全占比审计
+// ---------------------------------------------------------------------------
+
+function renderSideStructure(sideName, side) {
+  const wrap = document.createElement("div");
+  wrap.className = "cruise-side";
+
+  const h = document.createElement("h3");
+  h.textContent =
+    `规程 ${sideName}：${side.classes.length} 个闭类，` +
+    `轮次级最终周期 ${side.periodRounds}（全局 ${side.grid} 相位）`;
+  wrap.appendChild(h);
+
+  const meta = document.createElement("p");
+  meta.className = "cruise-meta";
+  const trans = side.transientStates.length
+    ? side.transientStates.join(", ")
+    : "无";
+  meta.textContent =
+    `暂态状态：{${trans}}（初始暂态质量 ${fracText(side.transientMass)}）`;
+  wrap.appendChild(meta);
+
+  side.classes.forEach((cls, ci) => {
+    const div = document.createElement("div");
+    div.className = "closed-class";
+    const title = document.createElement("div");
+    title.className = "class-title";
+    title.textContent =
+      `闭类 #${ci}：状态 {${cls.states.join(", ")}}，周期 d = ${cls.period}`;
+    div.appendChild(title);
+
+    const cyclic = document.createElement("div");
+    cyclic.className = "class-line";
+    cyclic.textContent =
+      "循环类：" +
+      cls.cyclicClasses.map((cq) => `{${cq.join(", ")}}`).join(" → … → ");
+    div.appendChild(cyclic);
+
+    const mu = document.createElement("div");
+    mu.className = "class-line";
+    mu.textContent =
+      "平稳分布 μ：" +
+      cls.states.map((s, i) => `${s}↦${fracText(cls.stationary[i])}`).join("，");
+    div.appendChild(mu);
+
+    const weights = document.createElement("div");
+    weights.className = "class-line";
+    weights.textContent = `吸收权重（长期落在该闭类的质量）：${fracText(cls.weight)}`;
+    div.appendChild(weights);
+
+    wrap.appendChild(div);
+  });
+  return wrap;
+}
+
+function renderPhaseTable(result) {
+  const table = document.createElement("table");
+  table.className = "step-table cruise-phase-table";
+  const thead = document.createElement("thead");
+  const hr = document.createElement("tr");
+  for (const text of ["全局相位 t", "周期轮次 r", "命令相位", "A 安全概率", "B 安全概率", "一致"]) {
+    const th = document.createElement("th");
+    th.textContent = text;
+    hr.appendChild(th);
+  }
+  thead.appendChild(hr);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  result.phases.forEach((ph) => {
+    const tr = document.createElement("tr");
+    if (!ph.equal) tr.className = "phase-diff";
+    const cells = [
+      String(ph.t),
+      String(ph.round),
+      String(ph.phase),
+      fracText(ph.A),
+      fracText(ph.B),
+      ph.equal ? "=" : "≠",
+    ];
+    for (const text of cells) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  return table;
+}
+
+function renderContributionList(items) {
+  const ul = document.createElement("ul");
+  ul.className = "contrib-list";
+  for (const c of items) {
+    const li = document.createElement("li");
+    li.textContent =
+      `闭类 {${c.states.join(", ")}}（周期 ${c.period}）：` +
+      `吸收权重 ${fracText(c.weight)}，安全概率贡献 ${fracText(c.safetyContribution)}`;
+    ul.appendChild(li);
+  }
+  return ul;
+}
+
+function renderCruise(result) {
+  const box = $("cruise-result");
+  box.className = `result ${result.equivalent ? "verdict-equivalent" : "verdict-diff"}`;
+  box.innerHTML = "";
+
+  const h = document.createElement("h2");
+  h.textContent = result.equivalent
+    ? "✓ 巡航周期无限重复：两侧逐相位长期安全概率一致"
+    : "✗ 巡航周期无限重复：两侧长期安全占比存在差异";
+  box.appendChild(h);
+
+  const meta = document.createElement("p");
+  meta.innerHTML =
+    `服务端确认的巡航周期：<span class="word-badge">${result.cycle.replace(/</g, "&lt;")}</span>` +
+    `（长度 ${result.cycleLength}）；两侧共同重复周期为 ` +
+    `<strong>${result.commonGrid}</strong> 个全局相位` +
+    `（周期轮次最小公倍数 ${result.commonPeriodRounds}，每轮 ${result.cycleLength} 个命令相位）。`;
+  box.appendChild(meta);
+
+  if (!result.equivalent) {
+    const fd = result.firstDifference;
+    const card = document.createElement("div");
+    card.className = "first-diff";
+    const dh = document.createElement("h3");
+    dh.textContent =
+      `最早差异：全局相位 t = ${fd.t}` +
+      `（第 ${fd.round} 轮、命令相位 ${fd.phase}）`;
+    card.appendChild(dh);
+    const dp = document.createElement("p");
+    dp.textContent =
+      `A 长期安全概率 = ${fracText(fd.A)}；B 长期安全概率 = ${fracText(fd.B)}` +
+      `；精确差 P_A − P_B = ${fracText(fd.difference)}。`;
+    card.appendChild(dp);
+
+    for (const side of sides) {
+      const sh = document.createElement("div");
+      sh.className = "class-line";
+      sh.textContent = `规程 ${side} 在该相位的闭类贡献权重：`;
+      card.appendChild(sh);
+      card.appendChild(renderContributionList(fd.contributions[side]));
+    }
+    box.appendChild(card);
+  }
+
+  const trace = document.createElement("div");
+  trace.className = "trace";
+  trace.appendChild(renderSideStructure("A", result.A));
+  trace.appendChild(renderSideStructure("B", result.B));
+  box.appendChild(trace);
+
+  const ph = document.createElement("h3");
+  ph.textContent = "共同重复周期逐相位安全概率（精确分数）";
+  box.appendChild(ph);
+  box.appendChild(renderPhaseTable(result));
+
+  box.hidden = false;
+}
+
+$("btn-cruise").addEventListener("click", async () => {
+  clearHighlights();
+  $("cruise-cycle").classList.remove("invalid");
+  $("errors").hidden = true;
+  $("cruise-result").hidden = true;
+
+  let payload;
+  try {
+    payload = {
+      A: collectPayload("A"),
+      B: collectPayload("B"),
+      cycle: $("cruise-cycle").value,
+    };
+  } catch (e) {
+    showErrors([{ loc: ["cycle"], msg: `表单读取失败：${e.message}` }]);
+    return;
+  }
+
+  try {
+    const resp = await fetch("/api/cruise", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (!resp.ok || !data.ok) {
+      // 巡航输入非法：定位本次巡航输入并清除旧审计结论
+      $("cruise-result").hidden = true;
+      showErrors(data.errors || [{ loc: ["cycle"], msg: "服务端返回未知错误" }]);
+      return;
+    }
+    renderCruise(data.result);
+  } catch (e) {
+    showErrors([{ loc: ["cycle"], msg: `API 请求失败：${e.message}` }]);
   }
 });
 

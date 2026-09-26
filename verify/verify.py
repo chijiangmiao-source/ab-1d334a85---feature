@@ -30,6 +30,7 @@ from app.equivalence import (  # noqa: E402
     compare,
     parse_procedure,
 )
+from app.cruise import audit_cruise  # noqa: E402
 
 TARGET = os.environ.get("TARGET_URL", "http://acoustic-review:8000")
 
@@ -124,6 +125,79 @@ try:
     check("核心校验: 初始分布和不为一被拒", False, "未抛错")
 except ProcedureValidationError:
     check("核心校验: 初始分布和不为一被拒", True)
+
+# ---------------------------------------------------------------------------
+# 1b. 巡航周期长期安全占比审计（核心，精确有理数，无模拟/浮点）
+# ---------------------------------------------------------------------------
+
+# 周期 2 闭类：安全概率必须在 1、0 间交替，而非取长期平均 1/2
+SWAP = [["0", "1"], ["1", "0"]]
+STAY = [["0", "1"], ["0", "1"]]
+cres = audit_cruise(
+    proc(2, ["1", "0"], [0], {"x": SWAP}),
+    proc(2, ["1", "0"], [0], {"x": SWAP}),
+    ["x"],
+)
+check("巡航: 周期2闭类识别正确", cres["A"]["classes"][0]["period"] == 2, str(cres["A"]["classes"]))
+check(
+    "巡航: 相位概率精确交替 1,0（非平均 1/2）",
+    cres["A"]["phaseProbs"] == [Fraction(1), Fraction(0)],
+    str(cres["A"]["phaseProbs"]),
+)
+
+# 暂态质量分流：1/2→周期2闭类、1/2→吸收闭类，相位安全概率 [1/2, 1]
+MIX = [
+    ["0", "1", "0", "0"],
+    ["1", "0", "0", "0"],
+    ["0", "0", "1", "0"],
+    ["1/2", "0", "1/2", "0"],
+]
+cres2 = audit_cruise(
+    proc(4, ["0", "0", "0", "1"], [0, 2], {"x": MIX}),
+    proc(4, ["0", "0", "0", "1"], [0, 2], {"x": MIX}),
+    ["x"],
+)
+check(
+    "巡航: 暂态/闭类分流与吸收权重精确",
+    cres2["A"]["phaseProbs"] == [Fraction(1, 2), Fraction(1)]
+    and sum((c["weight"] for c in cres2["A"]["classes"]), Fraction(0)) == 1,
+    str(cres2["A"]["phaseProbs"]),
+)
+
+# 最早相位差异：A 交替（t=0 为 1），B 吸收到非安全态（恒 0）
+cres3 = audit_cruise(
+    proc(2, ["1", "0"], [0], {"x": SWAP}),
+    proc(2, ["1", "0"], [0], {"x": STAY}),
+    ["x"],
+)
+fd3 = cres3["firstDifference"]
+check(
+    "巡航: 最早差异相位为 t=0 且概率精确",
+    cres3["equivalent"] is False
+    and fd3["t"] == 0
+    and fd3["A"] == Fraction(1)
+    and fd3["B"] == Fraction(0),
+    str(fd3),
+)
+check(
+    "巡航: 闭类贡献之和恰为该侧精确概率",
+    sum((c["safetyContribution"] for c in fd3["contributions"]["A"]), Fraction(0)) == Fraction(1)
+    and sum((c["safetyContribution"] for c in fd3["contributions"]["B"]), Fraction(0)) == Fraction(0),
+)
+
+# k=2 周期：轮内前缀不可交换，两相位分别为 1/3、2/3
+MX = [["0", "1"], ["1", "0"]]
+MY = [["1/2", "1/2"], ["0", "1"]]
+cres4 = audit_cruise(
+    proc(2, ["1", "0"], [0], {"x": MX, "y": MY}),
+    proc(2, ["1", "0"], [0], {"x": MX, "y": MY}),
+    ["x", "y"],
+)
+check(
+    "巡航: 长度2周期的逐相位概率 1/3, 2/3",
+    cres4["A"]["phaseProbs"] == [Fraction(1, 3), Fraction(2, 3)],
+    str(cres4["A"]["phaseProbs"]),
+)
 
 # ---------------------------------------------------------------------------
 # 2. 构建检查
@@ -254,6 +328,103 @@ check(
     and any(loc[:2] == ("A", "safe") for loc in locs)
     and any("prob" in loc for loc in locs),
     str(locs),
+)
+
+# --- 巡航审计 API 冒烟 -----------------------------------------------------
+
+cruise_swap = {
+    "n": 2,
+    "initial": ["1", "0"],
+    "safe": [0],
+    "commands": [
+        {
+            "symbol": "x",
+            "rows": [
+                [{"target": 0, "prob": "0"}, {"target": 1, "prob": "1"}],
+                [{"target": 0, "prob": "1"}, {"target": 1, "prob": "0"}],
+            ],
+        }
+    ],
+}
+status, body = http("POST", "/api/cruise", {"A": cruise_swap, "B": cruise_swap, "cycle": "x"})
+cresult = body.get("result", {})
+check("API 冒烟: 巡航等价对 200", status == 200 and cresult.get("equivalent") is True, f"{status} {body}")
+check(
+    "API 冒烟: 巡航周期由服务端确认回显",
+    cresult.get("cycle") == "x" and cresult.get("cycleLength") == 1,
+    str(cresult.get("cycle")),
+)
+check(
+    "API 巡航: 逐相位精确分数交替 1,0",
+    [p.get("A", {}).get("text") for p in cresult.get("phases", [])] == ["1", "0"],
+    str(cresult.get("phases")),
+)
+check(
+    "API 巡航: 闭类周期与循环类证据给出",
+    cresult.get("A", {}).get("classes", [{}])[0].get("period") == 2
+    and cresult["A"]["classes"][0].get("cyclicClasses") == [[0], [1]],
+)
+
+cruise_stay = json.loads(json.dumps(cruise_swap))
+cruise_stay["commands"][0]["rows"] = [
+    [{"target": 0, "prob": "0"}, {"target": 1, "prob": "1"}],
+    [{"target": 0, "prob": "0"}, {"target": 1, "prob": "1"}],
+]
+status, body = http("POST", "/api/cruise", {"A": cruise_swap, "B": cruise_stay, "cycle": "x"})
+fd = body.get("result", {}).get("firstDifference", {})
+check(
+    "API 巡航: 差异对给出最早相位与两侧精确概率",
+    status == 200
+    and fd.get("t") == 0
+    and fd.get("A", {}).get("text") == "1"
+    and fd.get("B", {}).get("text") == "0"
+    and fd.get("difference", {}).get("text") == "1",
+    str(fd),
+)
+check(
+    "API 巡航: 差异含两侧闭类贡献权重（精确分数）",
+    all(
+        set(c.get("weight", {})) == {"num", "den", "text"}
+        and set(c.get("safetyContribution", {})) == {"num", "den", "text"}
+        for side in ("A", "B")
+        for c in fd.get("contributions", {}).get(side, [])
+    ),
+)
+
+# 巡航输入非法：空周期 / 未声明命令 / 超长，均 400 且 loc 定位到 cycle
+for bad_cycle, needle in (("", "cycle"), ("xz", 1), ("xxxxxxx", "cycle")):
+    status, body = http(
+        "POST", "/api/cruise", {"A": cruise_swap, "B": cruise_swap, "cycle": bad_cycle}
+    )
+    locs = [tuple(e.get("loc", [])) for e in body.get("errors", [])]
+    ok = status == 400 and any(loc and loc[0] == "cycle" for loc in locs)
+    if needle != "cycle":
+        ok = ok and any(loc == ("cycle", needle) for loc in locs)
+    check(f"API 巡航: 非法周期 {bad_cycle!r} 400 且定位 cycle", ok, f"{status} {locs}")
+
+# 状态数超限：巡航拒绝（loc=cycle），普通复核保持可用
+big_ident = {
+    "n": 9,
+    "initial": ["1"] + ["0"] * 8,
+    "safe": [0],
+    "commands": [
+        {
+            "symbol": "x",
+            "rows": [
+                [
+                    {"target": j, "prob": "1" if i == j else "0"}
+                    for j in range(9)
+                ]
+                for i in range(9)
+            ],
+        }
+    ],
+}
+status, body = http("POST", "/api/cruise", {"A": big_ident, "B": big_ident, "cycle": "x"})
+check(
+    "API 巡航: 状态数超 8 被拒且定位 cycle",
+    status == 400 and any(tuple(e.get("loc", [])) == ("cycle",) for e in body.get("errors", [])),
+    f"{status} {body}",
 )
 
 # ---------------------------------------------------------------------------
