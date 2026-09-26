@@ -3,13 +3,16 @@
 
 验收三件事，全部通过才以退出码 0 结束：
 
-1. 最短概率反例：直接在镜像内调用精确有理数核心，断言
+1. 最短概率反例 + 巡航周期审计：直接在镜像内调用精确有理数核心，断言
    - 差异只在长度 2 暴露时给出最短反例 "aa"；
    - 同长度按 ASCII 字典序取最小；
    - 等价样例判定为等价；
-   - 概率和不为一 / 非法分数被拒绝。
+   - 概率和不为一 / 非法分数被拒绝；
+   - 巡航审计：暂态质量、全部闭类及其周期、循环子类权重、
+     各命令相位最终周期性安全概率均为精确分数，差异时给出最早相位。
 2. 检查构建：镜像内应用代码、静态页面与 uvicorn 均就位。
-3. API 冒烟：对运行中的服务打 /healthz、/api/review（等价、反例、非法输入），
+3. API 冒烟：对运行中的服务打 /healthz、/api/review（等价、反例、非法输入）
+   与 /api/cruise（一致、差异、空周期、未声明命令、超长周期、状态数超限），
    校验状态码、定位信息与精确分数字段，全程无浮点数。
 """
 
@@ -30,6 +33,7 @@ from app.equivalence import (  # noqa: E402
     compare,
     parse_procedure,
 )
+from app.cruise import audit, audit_pair  # noqa: E402
 
 TARGET = os.environ.get("TARGET_URL", "http://acoustic-review:8000")
 
@@ -124,6 +128,59 @@ try:
     check("核心校验: 初始分布和不为一被拒", False, "未抛错")
 except ProcedureValidationError:
     check("核心校验: 初始分布和不为一被拒", True)
+
+# ---------------------------------------------------------------------------
+# 1b. 巡航周期审计（核心，精确有理数：暂态 / 闭类 / 周期 / 相位序列）
+# ---------------------------------------------------------------------------
+
+# 周期 2 翻转链：两侧安全态互补 → 最早相位 0 子相位 0 差异，精确概率 0 对 1
+FLIP2 = [["0", "1"], ["1", "0"]]
+cruise_res = audit_pair(
+    proc(2, ["1", "0"], [1], {"x": FLIP2}),
+    proc(2, ["1", "0"], [0], {"x": FLIP2}),
+    ["x"],
+)
+check("巡航核心: 周期链判定不一致", cruise_res["consistent"] is False)
+diff = cruise_res["firstDifference"]
+check(
+    "巡航核心: 最早差异相位/子相位 0/0",
+    diff["phase"] == 0 and diff["subPhase"] == 0,
+    str(diff),
+)
+check(
+    "巡航核心: 两侧精确概率 0 与 1、差 -1",
+    diff["A"] == Fraction(0) and diff["B"] == Fraction(1) and diff["difference"] == Fraction(-1),
+)
+check("巡航核心: 整体周期 D=2", cruise_res["A"]["period"] == 2)
+check(
+    "巡航核心: 闭类周期 2 且循环子类权重精确",
+    cruise_res["A"]["closedClasses"][0]["period"] == 2
+    and cruise_res["A"]["closedClasses"][0]["cyclic"][0]["weight"] == Fraction(1),
+)
+
+# 暂态 + 双吸收闭类：暂态质量 1、权重各 1/2、相位 0 安全占比 1/2
+MABS = [["0", "1/2", "1/2"], ["0", "1", "0"], ["0", "0", "1"]]
+rep = audit(proc(3, ["1", "0", "0"], [2], {"x": MABS}), ["x"])
+check(
+    "巡航核心: 暂态质量与闭类贡献权重精确",
+    rep["transientMass"] == Fraction(1)
+    and sorted(c["weight"] for c in rep["closedClasses"]) == [Fraction(1, 2), Fraction(1, 2)]
+    and rep["phases"][0]["safety"] == [Fraction(1, 2)],
+)
+
+# 等价样例巡航一致；闭类权重总和恒为 1
+MEQ = [["1/2", "1/2"], ["1/3", "2/3"]]
+same = proc(2, ["1", "0"], [1], {"x": MEQ})
+cruise_eq = audit_pair(same, proc(2, ["1", "0"], [1], {"x": MEQ}), ["x"])
+check("巡航核心: 等价样例逐相位一致", cruise_eq["consistent"] is True)
+check(
+    "巡航核心: 相位 0 安全占比精确为 3/5",
+    cruise_eq["A"]["phases"][0]["safety"] == [Fraction(3, 5)],
+)
+check(
+    "巡航核心: 闭类贡献权重总和为 1",
+    sum((c["weight"] for c in cruise_eq["A"]["closedClasses"]), Fraction(0)) == 1,
+)
 
 # ---------------------------------------------------------------------------
 # 2. 构建检查
@@ -254,6 +311,122 @@ check(
     and any(loc[:2] == ("A", "safe") for loc in locs)
     and any("prob" in loc for loc in locs),
     str(locs),
+)
+
+# --- /api/cruise：巡航周期长期安全占比审计 -------------------------------
+
+cruise_eq_body = dict(pair_eq)
+cruise_eq_body["cycle"] = "x"
+status, body = http("POST", "/api/cruise", cruise_eq_body)
+result = body.get("result", {})
+check(
+    "巡航 API: 等价对逐相位一致",
+    status == 200 and result.get("consistent") is True,
+    f"{status} {body}",
+)
+check(
+    "巡航 API: 服务端确认周期与精确相位概率 3/5",
+    result.get("cycle") == ["x"]
+    and result.get("A", {}).get("phases", [{}])[0].get("safety") == [
+        {"num": 3, "den": 5, "text": "3/5"}
+    ],
+    str(result.get("A", {}).get("phases")),
+)
+check(
+    "巡航 API: 闭类周期与贡献权重为精确分数",
+    result.get("A", {}).get("closedClasses", [{}])[0].get("weight")
+    == {"num": 1, "den": 1, "text": "1"},
+)
+
+cruise_diff_body = {
+    "A": {
+        "n": 2,
+        "initial": ["1", "0"],
+        "safe": [1],
+        "commands": [
+            {
+                "symbol": "x",
+                "rows": [
+                    [{"target": 0, "prob": "0"}, {"target": 1, "prob": "1"}],
+                    [{"target": 0, "prob": "1"}, {"target": 1, "prob": "0"}],
+                ],
+            }
+        ],
+    },
+    "cycle": "x",
+}
+cruise_diff_body["B"] = json.loads(json.dumps(cruise_diff_body["A"]))
+cruise_diff_body["B"]["safe"] = [0]
+status, body = http("POST", "/api/cruise", cruise_diff_body)
+result = body.get("result", {})
+diff = result.get("firstDifference", {})
+check(
+    "巡航 API: 差异对返回最早相位与两侧精确概率",
+    status == 200
+    and result.get("consistent") is False
+    and diff.get("phase") == 0
+    and diff.get("subPhase") == 0
+    and diff.get("A") == {"num": 0, "den": 1, "text": "0"}
+    and diff.get("B") == {"num": 1, "den": 1, "text": "1"}
+    and diff.get("difference") == {"num": -1, "den": 1, "text": "-1"},
+    f"{status} {body}",
+)
+
+cruise_bad = json.loads(json.dumps(cruise_eq_body))
+cruise_bad["cycle"] = ""
+status, body = http("POST", "/api/cruise", cruise_bad)
+check(
+    "巡航 API: 空周期 400 且定位巡航输入",
+    status == 400 and any(e.get("loc") == ["cycle"] for e in body.get("errors", [])),
+    f"{status} {body}",
+)
+
+cruise_bad = json.loads(json.dumps(cruise_eq_body))
+cruise_bad["cycle"] = "xz"
+status, body = http("POST", "/api/cruise", cruise_bad)
+check(
+    "巡航 API: 未声明命令 400 且定位到具体相位",
+    status == 400 and any(e.get("loc") == ["cycle", 1] for e in body.get("errors", [])),
+    f"{status} {body}",
+)
+
+cruise_bad = json.loads(json.dumps(cruise_eq_body))
+cruise_bad["cycle"] = "x" * 7
+status, body = http("POST", "/api/cruise", cruise_bad)
+check(
+    "巡航 API: 周期超长 400 且定位巡航输入",
+    status == 400 and any(e.get("loc") == ["cycle"] for e in body.get("errors", [])),
+    f"{status} {body}",
+)
+
+cruise_bad = json.loads(json.dumps(cruise_eq_body))
+cruise_bad["A"] = {
+    "n": 9,
+    "initial": ["1"] + ["0"] * 8,
+    "safe": [0],
+    "commands": [
+        {
+            "symbol": "x",
+            "rows": [
+                [{"target": j, "prob": "1" if i == j else "0"} for j in range(9)]
+                for i in range(9)
+            ],
+        }
+    ],
+}
+status, body = http("POST", "/api/cruise", cruise_bad)
+check(
+    "巡航 API: 状态数超限 400 且定位 A.n",
+    status == 400 and any(e.get("loc") == ["A", "n"] for e in body.get("errors", [])),
+    f"{status} {body}",
+)
+
+# 原有有限串复核接口响应保持不变
+status, body = http("POST", "/api/review", pair_eq)
+check(
+    "巡航上线后 /api/review 响应不变",
+    status == 200 and body.get("result") == {"equivalent": True},
+    f"{status} {body}",
 )
 
 # ---------------------------------------------------------------------------

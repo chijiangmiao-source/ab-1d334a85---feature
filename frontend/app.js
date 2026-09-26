@@ -142,9 +142,30 @@ function collectPayload(side) {
 // ---------------------------------------------------------------------------
 
 let dirty = false;
+// 巡航审计只在“当前草稿刚通过有限串复核”时解锁；任何再编辑都会重新上锁，
+// 保证旧巡航结论不会附着到新草稿。
+let cruiseArmed = false;
+
+function clearCruiseResult() {
+  const box = $("cruise-result");
+  box.hidden = true;
+  box.innerHTML = "";
+}
+
+function setCruiseArmed(on) {
+  cruiseArmed = on;
+  $("cruise-cycle").disabled = !on;
+  $("btn-cruise").disabled = !on;
+  $("cruise-status").textContent = on
+    ? "可填写 1–6 个两侧共同声明的 ASCII 命令作为巡航周期，提交后由服务端确认并审计。"
+    : "请先完成一次有限命令串复核（且草稿未再修改），巡航输入即解锁。";
+  if (!on) clearCruiseResult();
+}
+
 function markDirty() {
   dirty = true;
   $("result").hidden = true;
+  setCruiseArmed(false);
   clearHighlights();
 }
 
@@ -231,6 +252,10 @@ function showErrors(errors) {
     if (path) {
       const el = document.querySelector(`[data-path="${CSS.escape(path)}"]`);
       if (el) el.classList.add("invalid");
+    }
+    if (err.loc && err.loc[0] === "cycle") {
+      // 巡航周期输入的校验错误（空周期 / 超长 / 未声明命令）定位到巡航输入框
+      $("cruise-cycle").classList.add("invalid");
     }
     if (err.loc && (err.loc[0] === "A" || err.loc[0] === "B")) {
       const field = err.loc[1];
@@ -362,11 +387,212 @@ $("btn-review").addEventListener("click", async () => {
     });
     const data = await resp.json();
     if (!resp.ok || !data.ok) {
+      setCruiseArmed(false);
       showErrors(data.errors || [{ loc: [], msg: "服务端返回未知错误" }]);
       return;
     }
+    // 复核通过：解锁巡航审计（草稿此后一旦被修改会重新上锁）
+    setCruiseArmed(true);
     if (data.result.equivalent) renderEquivalent();
     else renderCounterexample(data.result);
+  } catch (e) {
+    setCruiseArmed(false);
+    showErrors([{ loc: [], msg: `API 请求失败：${e.message}` }]);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 巡航周期审计：提交与结果渲染（只展示服务端确认的周期、相位证据与结论）
+// ---------------------------------------------------------------------------
+
+$("cruise-cycle").addEventListener("input", () => {
+  // 修改巡航周期本身不算修改规程草稿，但旧审计结论立即失效
+  clearCruiseResult();
+  clearHighlights();
+});
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
+}
+
+function phaseLabel(j, cycle) {
+  if (j === 0) return "相位 0（周期边界）";
+  return `相位 ${j}（执行 ${escapeHtml(cycle.slice(0, j).join(""))} 后）`;
+}
+
+function seqText(safety) {
+  if (safety.length === 1) return fracText(safety[0]);
+  return safety.map((f, r) => `r${r}=${fracText(f)}`).join("，");
+}
+
+function fracEqual(f, g) {
+  return f.num === g.num && f.den === g.den;
+}
+
+function phasesEqual(seqA, seqB) {
+  // 两侧序列各按其周期重复，在最小公倍数的子相位网格上对齐比较
+  const lenA = seqA.length;
+  const lenB = seqB.length;
+  let span = lenA;
+  while (span % lenB !== 0) span += lenA;
+  for (let r = 0; r < span; r++) {
+    if (!fracEqual(seqA[r % lenA], seqB[r % lenB])) return false;
+  }
+  return true;
+}
+
+function renderCruiseSide(side, report) {
+  const div = document.createElement("div");
+  const h3 = document.createElement("h3");
+  h3.textContent = `规程 ${side}：整体周期 D = ${report.period}`;
+  div.appendChild(h3);
+
+  const transient = document.createElement("p");
+  transient.className = "cruise-meta";
+  transient.textContent = report.transientStates.length
+    ? `暂态状态 {${report.transientStates.join(", ")}}，初始暂态质量 ${fracText(report.transientMass)}（最终全部被闭类吸收）`
+    : "无暂态状态（全部状态均在闭类中）";
+  div.appendChild(transient);
+
+  const table = document.createElement("table");
+  table.className = "step-table";
+  const thead = document.createElement("thead");
+  const hr = document.createElement("tr");
+  for (const text of ["闭类状态", "周期", "吸收权重", "类内平稳安全占比", "循环子类（权重）"]) {
+    const th = document.createElement("th");
+    th.textContent = text;
+    hr.appendChild(th);
+  }
+  thead.appendChild(hr);
+  table.appendChild(thead);
+  const tbody = document.createElement("tbody");
+  for (const cls of report.closedClasses) {
+    const tr = document.createElement("tr");
+    const cyclic = cls.cyclic
+      .map((c) => `{${c.states.join(", ")}}：${fracText(c.weight)}`)
+      .join("；");
+    for (const text of [
+      `{${cls.states.join(", ")}}`,
+      String(cls.period),
+      fracText(cls.weight),
+      fracText(cls.safeShare),
+      cyclic,
+    ]) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  div.appendChild(table);
+  return div;
+}
+
+function renderCruise(result) {
+  const box = $("cruise-result");
+  box.className = `result ${result.consistent ? "verdict-equivalent" : "verdict-diff"}`;
+  box.innerHTML = "";
+
+  const cycleText = result.cycle.join("");
+  const h2 = document.createElement("h2");
+  h2.textContent = result.consistent
+    ? "✓ 巡航审计：两侧长期安全占比逐相位完全一致"
+    : "✗ 巡航审计：两侧长期安全占比存在差异";
+  box.appendChild(h2);
+
+  const meta = document.createElement("p");
+  meta.innerHTML =
+    `巡航周期（服务端确认）：<span class="word-badge">${escapeHtml(cycleText)}</span>` +
+    `（长度 ${result.cycleLength}，两侧无限重复）`;
+  box.appendChild(meta);
+
+  if (!result.consistent && result.firstDifference) {
+    const d = result.firstDifference;
+    const p = document.createElement("p");
+    p.className = "diff-line";
+    p.textContent =
+      `最早差异：${phaseLabel(d.phase, result.cycle)} · 子相位 r${d.subPhase}；` +
+      `P_A(安全) = ${fracText(d.A)}，P_B(安全) = ${fracText(d.B)}，` +
+      `差 = ${fracText(d.difference)}`;
+    box.appendChild(p);
+  }
+
+  // 相位对比表（证据：两侧各命令相位的最终周期性安全概率序列）
+  const cmp = document.createElement("table");
+  cmp.className = "step-table phase-table";
+  const thead = document.createElement("thead");
+  const hr = document.createElement("tr");
+  for (const text of ["命令相位", "规程 A（按子相位）", "规程 B（按子相位）", "结论"]) {
+    const th = document.createElement("th");
+    th.textContent = text;
+    hr.appendChild(th);
+  }
+  thead.appendChild(hr);
+  cmp.appendChild(thead);
+  const tbody = document.createElement("tbody");
+  const diffPhase = result.firstDifference ? result.firstDifference.phase : -1;
+  result.A.phases.forEach((phaseA, j) => {
+    const phaseB = result.B.phases[j];
+    const tr = document.createElement("tr");
+    if (j === diffPhase) tr.className = "diff-row";
+    const equal = phasesEqual(phaseA.safety, phaseB.safety);
+    for (const text of [
+      phaseLabel(j, result.cycle),
+      seqText(phaseA.safety),
+      seqText(phaseB.safety),
+      equal ? "一致" : j === diffPhase ? "最早差异" : "不一致",
+    ]) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  });
+  cmp.appendChild(tbody);
+  box.appendChild(cmp);
+
+  // 两侧状态分解证据：暂态质量、全部闭类及其周期、闭类贡献权重
+  const sidesWrap = document.createElement("div");
+  sidesWrap.className = "trace";
+  sidesWrap.appendChild(renderCruiseSide("A", result.A));
+  sidesWrap.appendChild(renderCruiseSide("B", result.B));
+  box.appendChild(sidesWrap);
+
+  box.hidden = false;
+}
+
+$("btn-cruise").addEventListener("click", async () => {
+  if (!cruiseArmed) return;
+  clearHighlights();
+  $("errors").hidden = true;
+  clearCruiseResult(); // 旧审计结论先清除，只展示本次服务端确认的结果
+
+  let payload;
+  try {
+    payload = {
+      A: collectPayload("A"),
+      B: collectPayload("B"),
+      cycle: $("cruise-cycle").value,
+    };
+  } catch (e) {
+    showErrors([{ loc: [], msg: `表单读取失败：${e.message}` }]);
+    return;
+  }
+
+  try {
+    const resp = await fetch("/api/cruise", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (!resp.ok || !data.ok) {
+      // 周期为空 / 含未声明命令 / 状态数超限等：定位本次巡航输入，旧结论保持清除
+      showErrors(data.errors || [{ loc: [], msg: "服务端返回未知错误" }]);
+      return;
+    }
+    renderCruise(data.result);
   } catch (e) {
     showErrors([{ loc: [], msg: `API 请求失败：${e.message}` }]);
   }

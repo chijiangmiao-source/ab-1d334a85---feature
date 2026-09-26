@@ -198,6 +198,51 @@ button.secondary {
   padding: 2px 8px;
 }
 
+.cruise {
+  grid-column: 1 / -1;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px 18px;
+}
+
+.cruise h2 { margin: 0 0 8px; font-size: 17px; }
+
+.hint { color: var(--muted); font-size: 13px; margin: 4px 0; }
+
+.cruise-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.cruise-row label { flex: 1 1 260px; }
+
+.cruise-row button { flex: 0 0 auto; }
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.cruise-meta { color: var(--muted); font-size: 13px; margin: 6px 0; }
+
+.phase-table { margin-top: 10px; }
+
+.phase-table td { text-align: center; }
+
+tr.diff-row td {
+  background: rgba(255, 107, 107, 0.12);
+  border-color: var(--bad);
+}
+
 footer {
   text-align: center;
   color: var(--muted);

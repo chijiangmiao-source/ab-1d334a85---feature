@@ -59,6 +59,23 @@
 
   <section id="errors" class="errors" hidden></section>
   <section id="result" class="result" hidden></section>
+
+  <section class="cruise" id="cruise">
+    <h2>巡航周期 · 长期安全占比审计</h2>
+    <p class="hint">
+      完成上方有限命令串复核后，可填写由两侧<strong>共同声明的 ASCII 命令</strong>构成的巡航周期
+      （1–6 个字符），审计两侧无限重复该周期时每个命令相位的最终周期性安全概率：
+      服务端将周期压缩为精确随机矩阵，区分暂态质量、全部闭类及其周期，不使用浮点或固定轮数模拟。
+    </p>
+    <div class="cruise-row">
+      <label>巡航周期
+        <input type="text" id="cruise-cycle" placeholder="例如 aba（由共同命令构成，≤ 6 字符）" disabled />
+      </label>
+      <button id="btn-cruise" type="button" disabled>请求巡航审计</button>
+    </div>
+    <p class="hint" id="cruise-status">请先完成一次有限命令串复核（且草稿未再修改），巡航输入即解锁。</p>
+  </section>
+  <section id="cruise-result" class="result" hidden></section>
 </main>
 
 <footer>声学规程前后端 · Docker / Compose 发布</footer>
