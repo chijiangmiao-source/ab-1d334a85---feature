@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>声学应急控制器规程等价性复核</title>
+<link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+<header>
+  <h1>声学应急控制器 · 规程等价性复核</h1>
+  <p class="subtitle">任意精度有理数判定：所有有限命令串的最终安全态概率是否一致（不枚举长度上限、不使用浮点数）</p>
+</header>
+
+<main>
+  <section class="editor" id="editor-A" data-side="A">
+    <h2>现网规程 A</h2>
+    <div class="meta-row">
+      <label>状态数 <input type="number" min="1" step="1" id="n-A" value="2" /></label>
+      <label>安全状态（逗号分隔编号，自 0 起）
+        <input type="text" id="safe-A" value="1" />
+      </label>
+    </div>
+    <div class="field">
+      <label>初始状态分布（分数，空格/逗号分隔，如 <code>1/2 1/2</code>）</label>
+      <input type="text" id="initial-A" value="1 0" />
+    </div>
+    <div class="field">
+      <label>ASCII 命令（单个字符，逗号分隔）</label>
+      <input type="text" id="symbols-A" value="x" />
+    </div>
+    <div id="commands-A" class="commands"></div>
+  </section>
+
+  <section class="editor" id="editor-B" data-side="B">
+    <h2>候选规程 B</h2>
+    <div class="meta-row">
+      <label>状态数 <input type="number" min="1" step="1" id="n-B" value="2" /></label>
+      <label>安全状态（逗号分隔编号，自 0 起）
+        <input type="text" id="safe-B" value="1" />
+      </label>
+    </div>
+    <div class="field">
+      <label>初始状态分布（分数，空格/逗号分隔，如 <code>1/2 1/2</code>）</label>
+      <input type="text" id="initial-B" value="1 0" />
+    </div>
+    <div class="field">
+      <label>ASCII 命令（单个字符，逗号分隔）</label>
+      <input type="text" id="symbols-B" value="x" />
+    </div>
+    <div id="commands-B" class="commands"></div>
+  </section>
+
+  <section class="actions">
+    <button id="btn-review" type="button">提交复核</button>
+    <button id="btn-example" type="button" class="secondary">载入：长度2反例样例</button>
+    <button id="btn-equivalent-example" type="button" class="secondary">载入：等价样例</button>
+  </section>
+
+  <section id="errors" class="errors" hidden></section>
+  <section id="result" class="result" hidden></section>
+</main>
+
+<footer>声学规程前后端 · Docker / Compose 发布</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>

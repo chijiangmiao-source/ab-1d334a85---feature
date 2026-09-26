@@ -1,0 +1,36 @@
+services:
+  acoustic-review:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: acoustic-procedure-review:latest
+    # 宿主端口可配置：HOST_PORT 默认 8000
+    ports:
+      - "${HOST_PORT:-8000}:8000"
+    environment:
+      # 容器内监听地址/端口可配置
+      HOST: 0.0.0.0
+      PORT: "8000"
+    healthcheck:
+      # 健康检查间隔/超时/重试可配置（.env 或 shell 环境覆盖）
+      test: ["CMD", "python", "-c", "import os,urllib.request,sys; port=os.environ.get('PORT','8000'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{port}/healthz', timeout=2).status==200 else 1)"]
+      interval: ${HEALTH_INTERVAL:-10s}
+      timeout: ${HEALTH_TIMEOUT:-3s}
+      retries: ${HEALTH_RETRIES:-5}
+      start_period: ${HEALTH_START_PERIOD:-5s}
+
+  # 验收服务：运行最短概率反例测试、构建检查与 API 冒烟，结束即退出，
+  # 退出码即验收结论（0 通过 / 非 0 失败）。
+  verify:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: acoustic-procedure-review:latest
+    depends_on:
+      acoustic-review:
+        condition: service_healthy
+    environment:
+      TARGET_URL: http://acoustic-review:8000
+    entrypoint: ["python", "/verify/verify.py"]
+    volumes:
+      - ./verify:/verify:ro
